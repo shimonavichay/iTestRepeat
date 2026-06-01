@@ -11,51 +11,56 @@ from tkinter import ttk
 from datetime import date
 import multiprocessing  # For running popups in a separate process (tkinter in a thread gets closed when the exe gets closed)
 import argparse         # For command line arguments
-import sys
-import os
-import ctypes
+import sys              # For sys.argv, sys.exit, sys.executable, sys.frozen
+import os               # For path handling and reading the exe's own location
+import ctypes           # Only used by the (currently disabled) console-attach block below
 
-VERSION = "0.4.04"  # Unified popup function
+VERSION = "0.4.05"  # Cleanup pass: removed debug prints, fixed comments, documented font param
 
-if __name__ == "__main__":
-    if ctypes.windll.kernel32.AttachConsole(-1):  # -1 means "attach to parent process console"
-        try:
-            import io
-            _conout = open('CONOUT$', 'wb', buffering=0)
-            sys.stdout = io.TextIOWrapper(_conout, encoding='utf-8', errors='replace', line_buffering=True)
-            sys.stderr = sys.stdout
-        except Exception:
-            pass  # Can't display this error, but at least we don't crash silently on a bad open()
+# The console-attach block below is kept disabled. It was an attempt to make a --noconsole
+# exe print to the parent terminal, but output was unreliable and it risked breaking
+# script-mode stdout. Help/version/errors now use popups instead. Slated for deletion.
+#if __name__ == "__main__":
+#    if ctypes.windll.kernel32.AttachConsole(-1):  # -1 means "attach to parent process console"
+#        try:
+#            import io
+#            _conout = open('CONOUT$', 'wb', buffering=0)
+#            sys.stdout = io.TextIOWrapper(_conout, encoding='utf-8', errors='replace', line_buffering=True)
+#            sys.stderr = sys.stdout
+#        except Exception:
+#            pass  # Can't display this error, but at least we don't crash silently on a bad open()
 #PARENT = psutil.Process(os.getppid()).name()
 #HAS_TERMINAL = PARENT not in ("explorer.exe",)
-# The last 2 lines are in case I'd want to destinguish, so I'll have the lines Claude suggested to test and use.
+# The last 2 lines are in case I'd want to distinguish the parent terminal type later.
 
 PROGRAM_PATH = r"C:\Program Files (x86)\CET\iTest\iTestLauncher.exe"
 PROCESS_NAME = "iTestLauncher.exe"  # Must match the exact process name shown in Task Manager
-MAX_LOOPS = None                                         # but if it's a double-click on the file - stop after 5 loops
-OPEN = True # For testing. In develepment we won't neccecery want the proggram to open every time
+MAX_LOOPS = None  # No limit by default; get_exe_folder() sets it to 5 when running as a script
+OPEN = True       # Whether to actually launch iTest; get_exe_folder() sets it False in script mode (for testing)
 
 
 def get_exe_folder():
     """Returns the folder where the exe (or script) is located.
     Needed because the 'current folder' depends on how the program was launched,
-    which may differ from the exe's actual location."""
+    which may differ from the exe's actual location.
+    Also adjusts MAX_LOOPS and OPEN when running as a plain script (development mode)."""
     global MAX_LOOPS
     global OPEN
     if getattr(sys, 'frozen', False):
         # Running as a compiled exe (PyInstaller sets sys.frozen = True)
         return os.path.dirname(sys.executable)
     else:
-        # Running as a plain Python script
+        # Running as a plain Python script — limit loops and don't launch iTest
         MAX_LOOPS = 5
         OPEN = False
         return os.path.dirname(os.path.abspath(__file__))
 
 
-def _selectable_label(parent, text, font, height=1):
-    """Text widget styled like a Label but with selectable text."""
+def _selectable_label(parent, text, family="Segoe UI", size=12, weight="normal", height=1):
+    """Text widget styled like a Label but with selectable text.
+    family/size/weight default to the standard popup font; pass overrides to change them."""
     widget = tk.Text(
-        parent, font=font, height=height,
+        parent, font=(family, size, weight), height=height,
         width=max(len(line) for line in text.split("\n")) + 2,
         borderwidth=0, highlightthickness=0,
         background=parent.cget("bg"), wrap="none"
@@ -65,40 +70,52 @@ def _selectable_label(parent, text, font, height=1):
     return widget
 
 
-def _build_message_content(root, message):
-    """Builds the layout for an info/error popup inside the given root window."""
+def _build_message_content(root, message, font=None):
+    """Builds the layout for an info/error popup inside the given root window.
+    font: optional dict of _selectable_label kwargs (family/size/weight).
+    Returns (label, copy_button, close_button)."""
+    font = font or {}
     lines = message.split("\n")
-    _selectable_label(root, message, ("Segoe UI", 12), height=len(lines)).grid(
-        row=0, column=0, columnspan=2, padx=20, pady=20)
-
-    ttk.Button(root, text="Close", command=root.destroy).grid(row=1, column=0, padx=10, pady=10)
+    label = _selectable_label(root, message, **font, height=len(lines))
+    label.grid(row=0, column=0, columnspan=2, padx=20, pady=20)
 
     def copy_all():
         root.clipboard_clear()
         root.clipboard_append(message)
-    ttk.Button(root, text="Copy", command=copy_all).grid(row=1, column=1, padx=10, pady=10)
+    copy_button = ttk.Button(root, text="Copy", command=copy_all)
+    copy_button.grid(row=1, column=0, padx=10, pady=10)
+
+    close_button = ttk.Button(root, text="Close", command=root.destroy)
+    close_button.grid(row=1, column=1, padx=10, pady=10)
+
+    return label, copy_button, close_button
 
 
 def _build_password_content(root, tests):
     """Builds the layout for a password popup inside the given root window.
     - Single test: shows 'Password: XXXX' with Copy and Close buttons
-    - Multiple tests: shows one row per test, each with its own Copy button"""
+    - Multiple tests: shows one row per test, each with its own Copy button
+    Returns (labels_dict, close_button), where labels_dict maps index -> {"label", "Button"}."""
+    labels = {}
     if len(tests) == 1:
         test = tests[0]
-        _selectable_label(root, f"Password: {test['password']}", ("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, padx=20, pady=20)
+        labels[0] = {"label": _selectable_label(root, f"Password: {test['password']}", size=14, weight="bold")}
+        labels[0]["label"].grid(row=0, column=0, columnspan=2, padx=20, pady=20)
 
         def copy():
             root.clipboard_clear()
             root.clipboard_append(test["password"])
+        labels[0]["Button"] = ttk.Button(root, text="Copy", command=copy)
+        labels[0]["Button"].grid(row=1, column=0, padx=10, pady=10)
 
-        ttk.Button(root, text="Copy", command=copy).grid(row=1, column=0, padx=10, pady=10)
-        ttk.Button(root, text="Close", command=root.destroy).grid(row=1, column=1, padx=10, pady=10)
+        close_button = ttk.Button(root, text="Close", command=root.destroy)
+        close_button.grid(row=1, column=1, padx=10, pady=10)
+
     else:
         for i, test in enumerate(tests):
             # \u202B = RTL marker, fixes Hebrew rendering
-            _selectable_label(root, f"\u202B{test['name']}: {test['password']}", ("Segoe UI", 12)).grid(
-                row=i, column=0, padx=20, pady=5, sticky="w")
+            labels[i] = {"label": _selectable_label(root, f"\u202B{test['name']}: {test['password']}")}
+            labels[i]["label"].grid(row=i, column=1, padx=20, pady=5, sticky="w")
 
             # p=test["password"] captures the value at loop time, not at click time.
             # Without this, all buttons would copy the last test's password.
@@ -106,14 +123,22 @@ def _build_password_content(root, tests):
                 root.clipboard_clear()
                 root.clipboard_append(p)
 
-            ttk.Button(root, text="Copy", command=copy).grid(row=i, column=1, padx=10, pady=5)
+            labels[i]["Button"] = ttk.Button(root, text="Copy", command=copy)
+            labels[i]["Button"].grid(row=i, column=0, padx=10, pady=5)
 
-        ttk.Button(root, text="Close", command=root.destroy).grid(
-            row=len(tests), column=0, columnspan=2, pady=10)
+        close_button = ttk.Button(root, text="Close", command=root.destroy)
+        close_button.grid(row=len(tests), column=0, columnspan=2, pady=10)
+
+    return labels, close_button
 
 
-def _popup_window(message=None, tests=None, error=False, TimeToClose=False):
-    """The actual tkinter window. Runs inside the spawned process (or directly for blocking calls)."""
+def _popup_window(message=None, tests=None, error=False, TimeToClose=False, font=None):
+    """The actual tkinter window. Runs inside the spawned process (or directly for blocking calls).
+    - message: text for info/error popups
+    - tests: list of test dicts for password popups (mutually exclusive with message)
+    - error: if True, title is "Error", otherwise "Information"
+    - TimeToClose: seconds before auto-close. If False/0, stays open until closed manually.
+    - font: optional dict of _selectable_label kwargs (family/size/weight) passed through to the message label."""
     root = tk.Tk()
     root.title("Exam Password" if tests else ("Error" if error else "Information"))
     root.resizable(False, False)
@@ -122,7 +147,7 @@ def _popup_window(message=None, tests=None, error=False, TimeToClose=False):
     if tests:
         _build_password_content(root, tests)
     else:
-        _build_message_content(root, message)
+        _build_message_content(root, message, font=font)
 
     # Position the window at the top-center of the screen
     root.update_idletasks()  # Required before winfo_screenwidth() returns correct values
@@ -135,19 +160,31 @@ def _popup_window(message=None, tests=None, error=False, TimeToClose=False):
     root.mainloop()
 
 
-def popup(message=None, tests=None, error=False, TimeToClose=False, daemon=True):
+def popup(message=None, tests=None, error=False, TimeToClose=False, daemon=True, font=None):
     """Spawns a separate process showing a popup window.
     - message: text for info/error popups
     - tests: list of test dicts for password popups (mutually exclusive with message)
     - error: if True, title is "Error", otherwise "Information" / "Exam Password"
     - TimeToClose: seconds before auto-close. If False/0, stays open until closed manually.
     - daemon: if False, popup survives after main process exits.
+    - font: optional dict of _selectable_label kwargs (family/size/weight) passed through to the popup window.
     Returns the spawned process so the caller can track/terminate it."""
     # Run popup in a separate process — tkinter windows are destroyed along
     # with the thread they were created in, so threading doesn't work here
+    try:
+        if message:
+            print(message)
+    except Exception:  # Non-critical debug aid — don't block under any circumstance
+        pass  # No console available (windowed mode with no parent console)
     p = multiprocessing.Process(
         target=_popup_window,
-        args=(message, tests, error, TimeToClose),
+        kwargs={
+            "message": message,
+            "tests": tests,
+            "error": error,
+            "TimeToClose": TimeToClose,
+            "font": font,
+        },
         daemon=daemon
     )
     p.start()
@@ -178,7 +215,7 @@ def create_example_csv(csv_path):
 def get_todays_tests(csv_path, csv_specified):
     """Reads the CSV and returns a list of today's tests as dicts: {name, password}.
     If the file isn't found and the user specified the path explicitly, shows an error popup.
-    If no path was specified, silently ignores the missing file (it may just not needed)."""
+    If no path was specified, silently ignores the missing file (it may just not be needed)."""
     today = date.today().strftime("%d/%m/%Y")
     tests = []
     try:
@@ -219,6 +256,8 @@ def launch(csv_path, csv_specified):
 def main():
     exe_folder = get_exe_folder()
 
+    HELP_ALIASES = ("-h", "--help", "-?")
+    VERSION_ALIASES = ("-v", "--version")
     parser = argparse.ArgumentParser(
         prog="iTestRepeat",
         description=f"iTestRepeat v{VERSION} - Automatic iTest Launcher with Exam Password Display",
@@ -253,12 +292,12 @@ def main():
         help="Stop the running instance of iTestRepeat."
     )
     parser.add_argument(
-        "--version", "-v",
+        *VERSION_ALIASES,
         action="store_true",
         help="Show the version number and exit."
     )
     parser.add_argument(
-        "-h", "--help", "-?",
+        *HELP_ALIASES,
         action="store_true",
         dest="help",
         help="Show this help message and exit."
@@ -266,11 +305,11 @@ def main():
 
     # Handle --help / --version manually so we can show them in a popup instead of stdout
     # (since the console may not be available in --noconsole compiled mode)
-    if any(arg in sys.argv for arg in ("-h", "--help", "-?")):
-        _popup_window(message=parser.format_help())  # Direct call (blocking) — we want to wait then exit
+    if any(arg in sys.argv for arg in HELP_ALIASES):
+        popup(message=parser.format_help(), font={"family": "Consolas"}, daemon=False)
         sys.exit()
-    if any(arg in sys.argv for arg in ("-v", "--version")):
-        _popup_window(message=f"iTestRepeat v{VERSION}")
+    if any(arg in sys.argv for arg in VERSION_ALIASES):
+        popup(message=f"iTestRepeat v{VERSION}", daemon=False)
         sys.exit()
 
     args = parser.parse_args()
@@ -292,7 +331,7 @@ def main():
     i = 0
     while True:
         i += 1
-        print(f"loop {i}")
+        print(f"loop {i}")  # Debug — harmless in --noconsole; slated for removal in v1.0
         if not is_running():
             launch(csv_path, csv_specified)
         time.sleep(3)

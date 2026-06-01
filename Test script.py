@@ -2,12 +2,16 @@ import subprocess
 import sys
 
 commands = [
-    #[],
-    #["--version"],
+    [],
+    ["--version"],
     #["--stop"],
     #["--init-csv", "--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
-    ["--csv", "fake.csv"],
-    #["-?"],
+    #["--init-csv", "--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
+    #["--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
+    #["--init-csv"],
+    ["-?"],
+    #["-h"],
+    #["--help"],
 ]
 
 for args in commands:
