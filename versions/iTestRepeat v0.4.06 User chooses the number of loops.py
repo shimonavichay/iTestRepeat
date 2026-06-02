@@ -14,8 +14,8 @@ import argparse         # For command line arguments
 import sys              # For sys.argv, sys.exit, sys.executable, sys.frozen
 import os               # For path handling and reading the exe's own location
 
-VERSION = "0.4.07"  # Fixing loop counter (lines 243+)
-DESC = "Fixing loop counter"
+VERSION = "0.4.06"  # Added --loop/-l argument; MAX_LOOPS now derived from it instead of a module global
+DESC = "User chooses the number of loops"
 
 PROGRAM_PATH = r"C:\Program Files (x86)\CET\iTest\iTestLauncher.exe"
 PROCESS_NAME = "iTestLauncher.exe"  # Must match the exact process name shown in Task Manager
@@ -340,17 +340,14 @@ def main():
             sys.exit(2)
 
     i = 0
-    launches = 0
     while True:
         i += 1
         print(f"loop {i}")  # Debug — harmless in --noconsole; slated for removal in v1.0
         if not is_running():
-            if MAX_LOOPS and launches >= MAX_LOOPS:  # MAX_LOOPS=0 (infinite) is falsy → never breaks
-                break
             launch(csv_path, csv_specified)
-            launches += 1
         time.sleep(3)
-
+        if MAX_LOOPS and i >= MAX_LOOPS:  # MAX_LOOPS=0 (infinite) is falsy → never breaks
+            break
 
 
 if __name__ == "__main__":

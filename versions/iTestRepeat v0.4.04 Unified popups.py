@@ -11,38 +11,49 @@ from tkinter import ttk
 from datetime import date
 import multiprocessing  # For running popups in a separate process (tkinter in a thread gets closed when the exe gets closed)
 import argparse         # For command line arguments
-import sys              # For sys.argv, sys.exit, sys.executable, sys.frozen
-import os               # For path handling and reading the exe's own location
+import sys
+import os
+import ctypes
 
-VERSION = "0.4.07"  # Fixing loop counter (lines 243+)
-DESC = "Fixing loop counter"
+VERSION = "0.4.04"  # Unified popup function
+
+if __name__ == "__main__":
+    if ctypes.windll.kernel32.AttachConsole(-1):  # -1 means "attach to parent process console"
+        try:
+            import io
+            _conout = open('CONOUT$', 'wb', buffering=0)
+            sys.stdout = io.TextIOWrapper(_conout, encoding='utf-8', errors='replace', line_buffering=True)
+            sys.stderr = sys.stdout
+        except Exception:
+            pass  # Can't display this error, but at least we don't crash silently on a bad open()
+#PARENT = psutil.Process(os.getppid()).name()
+#HAS_TERMINAL = PARENT not in ("explorer.exe",)
+# The last 2 lines are in case I'd want to destinguish, so I'll have the lines Claude suggested to test and use.
 
 PROGRAM_PATH = r"C:\Program Files (x86)\CET\iTest\iTestLauncher.exe"
 PROCESS_NAME = "iTestLauncher.exe"  # Must match the exact process name shown in Task Manager
-# MAX_LOOPS = None  # Removed: loop count now comes from the --loop arg, resolved inside main() as a local
-OPEN = True       # Whether to actually launch iTest; get_exe_folder() sets it False in script mode (for testing)
+MAX_LOOPS = None                                         # but if it's a double-click on the file - stop after 5 loops
+OPEN = True # For testing. In develepment we won't neccecery want the proggram to open every time
 
 
 def get_exe_folder():
     """Returns the folder where the exe (or script) is located.
     Needed because the 'current folder' depends on how the program was launched,
-    which may differ from the exe's actual location.
-    Also sets OPEN = False when running as a script (so testing doesn't launch iTest)."""
-    # global MAX_LOOPS  # Removed: MAX_LOOPS is no longer a global; --loop handles the limit now
+    which may differ from the exe's actual location."""
+    global MAX_LOOPS
     global OPEN
     if getattr(sys, 'frozen', False):
         # Running as a compiled exe (PyInstaller sets sys.frozen = True)
         return os.path.dirname(sys.executable)
     else:
-        # Running as a plain Python script — don't actually launch iTest
-        # MAX_LOOPS = 5  # Removed: the run-once default makes the script-mode safety cap unnecessary
+        # Running as a plain Python script
+        MAX_LOOPS = 5
         OPEN = False
         return os.path.dirname(os.path.abspath(__file__))
 
 
 def _selectable_label(parent, text, family="Segoe UI", size=12, weight="normal", height=1):
-    """Text widget styled like a Label but with selectable text.
-    family/size/weight default to the standard popup font; pass overrides to change them."""
+    """Text widget styled like a Label but with selectable text."""
     widget = tk.Text(
         parent, font=(family, size, weight), height=height,
         width=max(len(line) for line in text.split("\n")) + 2,
@@ -55,9 +66,7 @@ def _selectable_label(parent, text, family="Segoe UI", size=12, weight="normal",
 
 
 def _build_message_content(root, message, font=None):
-    """Builds the layout for an info/error popup inside the given root window.
-    font: optional dict of _selectable_label kwargs (family/size/weight).
-    Returns (label, copy_button, close_button)."""
+    """Builds the layout for an info/error popup inside the given root window."""
     font = font or {}
     lines = message.split("\n")
     label = _selectable_label(root, message, **font, height=len(lines))
@@ -78,12 +87,11 @@ def _build_message_content(root, message, font=None):
 def _build_password_content(root, tests):
     """Builds the layout for a password popup inside the given root window.
     - Single test: shows 'Password: XXXX' with Copy and Close buttons
-    - Multiple tests: shows one row per test, each with its own Copy button
-    Returns (labels_dict, close_button), where labels_dict maps index -> {"label", "Button"}."""
+    - Multiple tests: shows one row per test, each with its own Copy button"""
     labels = {}
     if len(tests) == 1:
         test = tests[0]
-        labels[0] = {"label": _selectable_label(root, f"Password: {test['password']}", size=14, weight="bold")}
+        labels[0] = {"label":_selectable_label(root, f"Password: {test['password']}", size=14, weight="bold")}
         labels[0]["label"].grid(row=0, column=0, columnspan=2, padx=20, pady=20)
 
         def copy():
@@ -98,7 +106,7 @@ def _build_password_content(root, tests):
     else:
         for i, test in enumerate(tests):
             # \u202B = RTL marker, fixes Hebrew rendering
-            labels[i] = {"label": _selectable_label(root, f"\u202B{test['name']}: {test['password']}")}
+            labels[i] = {"label":_selectable_label(root, f"\u202B{test['name']}: {test['password']}")}
             labels[i]["label"].grid(row=i, column=1, padx=20, pady=5, sticky="w")
 
             # p=test["password"] captures the value at loop time, not at click time.
@@ -108,7 +116,7 @@ def _build_password_content(root, tests):
                 root.clipboard_append(p)
 
             labels[i]["Button"] = ttk.Button(root, text="Copy", command=copy)
-            labels[i]["Button"].grid(row=i, column=0, padx=10, pady=5)  # Copy on the left of each row (column 0)
+            labels[i]["Button"].grid(row=i, column=0, padx=10, pady=5)
 
         close_button = ttk.Button(root, text="Close", command=root.destroy)
         close_button.grid(row=len(tests), column=0, columnspan=2, pady=10)
@@ -116,13 +124,8 @@ def _build_password_content(root, tests):
     return labels, close_button
 
 
-def _popup_window(message=None, tests=None, error=False, time_to_close=0, font=None):
-    """The actual tkinter window. Runs inside the spawned process (or directly for blocking calls).
-    - message: text for info/error popups
-    - tests: list of test dicts for password popups (mutually exclusive with message)
-    - error: if True, title is "Error", otherwise "Information"
-    - time_to_close: seconds before auto-close. If False/0, stays open until closed manually.
-    - font: optional dict of _selectable_label kwargs (family/size/weight) passed through to the message label."""
+def _popup_window(message=None, tests=None, error=False, TimeToClose=False, font=None):
+    """The actual tkinter window. Runs inside the spawned process (or directly for blocking calls)."""
     root = tk.Tk()
     root.title("Exam Password" if tests else ("Error" if error else "Information"))
     root.resizable(False, False)
@@ -139,34 +142,34 @@ def _popup_window(message=None, tests=None, error=False, time_to_close=0, font=N
     # Push it all the way to the other side of the screen, go back the length of the window,
     # then cut it in half to get to the center
 
-    if time_to_close:
-        root.after(time_to_close * 1000, root.destroy)  # time_to_close is in seconds (messagebox doesn't support this)
+    if TimeToClose:
+        root.after(TimeToClose * 1000, root.destroy)  # TimeToClose is in seconds (messagebox doesn't support this)
     root.mainloop()
 
 
-def popup(message=None, tests=None, error=False, time_to_close=0, daemon=True, font=None):
+def popup(message=None, tests=None, error=False, TimeToClose=False, daemon=True, font=None):
+    print("POPUP CALLED, message =", repr(message))
     """Spawns a separate process showing a popup window.
     - message: text for info/error popups
     - tests: list of test dicts for password popups (mutually exclusive with message)
     - error: if True, title is "Error", otherwise "Information" / "Exam Password"
-    - time_to_close: seconds before auto-close. If False/0, stays open until closed manually.
+    - TimeToClose: seconds before auto-close. If False/0, stays open until closed manually.
     - daemon: if False, popup survives after main process exits.
-    - font: optional dict of _selectable_label kwargs (family/size/weight) passed through to the popup window.
     Returns the spawned process so the caller can track/terminate it."""
     # Run popup in a separate process — tkinter windows are destroyed along
     # with the thread they were created in, so threading doesn't work here
     try:
         if message:
-            print(message)
-    except Exception:  # Non-critical debug aid — don't block under any circumstance
-        pass  # No console available (windowed mode with no parent console)
+            print(f"messega: {message}")
+    except Exception: # It's a non-critical debug aid. Don't block under any circumstance.
+        pass  # No console available (windowed mode with no parent console).
     p = multiprocessing.Process(
         target=_popup_window,
         kwargs={
             "message": message,
             "tests": tests,
             "error": error,
-            "time_to_close": time_to_close,
+            "TimeToClose": TimeToClose,
             "font": font,
         },
         daemon=daemon
@@ -181,7 +184,7 @@ def create_example_csv(csv_path):
     if os.path.exists(csv_path):
         msg = f"File already exists:\n{csv_path}\n\nDelete or rename it first."
         # daemon=False so the popup survives after this process exits
-        popup(msg, error=True, time_to_close=10, daemon=False)
+        popup(msg, error=True, TimeToClose=10, daemon=False)
         return
 
     today = date.today().strftime("%d/%m/%Y")
@@ -191,15 +194,15 @@ def create_example_csv(csv_path):
             writer.writerow(["Date", "TestName", "Password"])
             writer.writerow([today, "Math Exam", "12345abc"])
             writer.writerow([today, "Physics Exam", "67890xyz"])
-        popup(f"Example CSV created at:\n{csv_path}", time_to_close=10, daemon=False)
+        popup(f"Example CSV created at:\n{csv_path}", TimeToClose=10, daemon=False)
     except Exception as e:
-        popup(f"Failed to create CSV:\n{e}", error=True, time_to_close=10, daemon=False)
+        popup(f"Failed to create CSV:\n{e}", error=True, TimeToClose=10, daemon=False)
 
 
-def get_today_tests(csv_path, csv_specified):
+def get_todays_tests(csv_path, csv_specified):
     """Reads the CSV and returns a list of today's tests as dicts: {name, password}.
     If the file isn't found and the user specified the path explicitly, shows an error popup.
-    If no path was specified, silently ignores the missing file (it may just not be needed)."""
+    If no path was specified, silently ignores the missing file (it may just not needed)."""
     today = date.today().strftime("%d/%m/%Y")
     tests = []
     try:
@@ -210,7 +213,7 @@ def get_today_tests(csv_path, csv_specified):
                     tests.append({"name": row["TestName"], "password": row["Password"]})
     except FileNotFoundError:
         if csv_specified:
-            popup(f"CSV not found:\n{csv_path}", error=True, time_to_close=10)
+            popup(f"CSV not found:\n{csv_path}", error=True, TimeToClose=10)
     return tests
 
 
@@ -230,7 +233,7 @@ def launch(csv_path, csv_specified):
     if popup_process is not None and popup_process.is_alive():
         popup_process.terminate()
 
-    tests = get_today_tests(csv_path, csv_specified)
+    tests = get_todays_tests(csv_path, csv_specified)
     if tests:
         popup_process = popup(tests=tests)
 
@@ -251,12 +254,10 @@ def main():
             r'  iTestRepeat.exe --csv "tests.csv"' "\n"
             r'  iTestRepeat.exe --csv "Z:\Admin\tests.csv"' "\n"
             r'  iTestRepeat.exe --csv "\\fileserver\Exams\tests.csv"' "\n"
-            r"  iTestRepeat.exe --loop" "\n"
-            r"  iTestRepeat.exe --loop 3" "\n"
             r"  iTestRepeat.exe --stop" "\n"
             r"  iTestRepeat.exe --version" "\n"
         ),
-        formatter_class=argparse.RawTextHelpFormatter,  # Preserves newlines in epilog and arg help  #! v0.4.06: was RawDescriptionHelpFormatter (epilog only)
+        formatter_class=argparse.RawDescriptionHelpFormatter,  # Preserves newlines in epilog
         add_help=False  # We add it manually below so we can include -? as an alias
     )
     parser.add_argument(
@@ -265,17 +266,6 @@ def main():
         help="Path to the tests CSV file. Can be relative or absolute.\n"
              "Default: tests.csv in the same folder as the exe.",
         default=None
-    )
-    parser.add_argument(
-        "-l", "--loop",
-        nargs="?",      # Accept -l alone, or -l with a value
-        default=1,      # -l not given at all → run once
-        const=0,        # -l given alone → 0, which we treat as infinite
-        metavar="N",
-        help="Repeat: relaunch iTest each time it closes.\n"
-             "Without a number, loops indefinitely.\n"
-             "With a number (e.g. -l 3), loops that many times.\n"
-             "Default (no -l): run once, then exit when iTest closes."
     )
     parser.add_argument(
         "--init-csv",
@@ -325,32 +315,15 @@ def main():
         create_example_csv(csv_path)
         sys.exit()
 
-    # Resolve --loop into MAX_LOOPS (1 = run once, 0 = infinite, N = loop N times)
-    # 0 doubles as "infinite" because the loop's `if MAX_LOOPS and ...` treats 0 as falsy → never breaks
-    if isinstance(args.loop, int):
-        MAX_LOOPS = args.loop  # default=1 (run once) or const=0 (infinite) — already an int, no parsing needed
-    else:
-        try:
-            MAX_LOOPS = int(args.loop)  # a string typed on the command line, e.g. "3"
-            if MAX_LOOPS < 1:
-                raise ValueError
-        except ValueError:
-            popup(f"-l accepts positive numbers only, got: {args.loop}",
-                  error=True, time_to_close=60, daemon=False)
-            sys.exit(2)
-
     i = 0
-    launches = 0
     while True:
         i += 1
-        print(f"loop {i}")  # Debug — harmless in --noconsole; slated for removal in v1.0
+        print(f"loop {i}")
         if not is_running():
-            if MAX_LOOPS and launches >= MAX_LOOPS:  # MAX_LOOPS=0 (infinite) is falsy → never breaks
-                break
             launch(csv_path, csv_specified)
-            launches += 1
         time.sleep(3)
-
+        if MAX_LOOPS and i >= MAX_LOOPS:
+            break
 
 
 if __name__ == "__main__":
