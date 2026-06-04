@@ -13,7 +13,7 @@ commands = [
     #["--init-csv", "--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
     #["--init-csv", "--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
     #["--csv", r"\\dca\Files-Open\Admin\iTestRepeat\tests_init.csv"],
-    ["-?"],
+    # ["-?"],
     #["-h"],
     #["--help"],
 ]

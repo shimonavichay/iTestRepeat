@@ -3,6 +3,6 @@
 venv/
 build/
 spec/
-dist/
+dist/old/
 __pycache__/
 *.pyc

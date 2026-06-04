@@ -12,6 +12,7 @@ BUILD_DIR = "build"        # PyInstaller's intermediate work folder
 DIST_DIR = "dist"          # Where the final exe lands
 SPEC_DIR = "spec"          # Where the generated .spec file goes
 VERSIONS_DIR = "versions"  # Archive of each version's source code
+OLD_DIR = os.path.join(DIST_DIR, "old")  # Previous exes — git-ignored, kept locally only
 
 # Read VERSION and its inline comment without executing the script
 with open(SCRIPT, encoding="utf-8") as f:
@@ -31,6 +32,23 @@ if not version:
 print(f"Building version {version}...")
 if description:
     print(f"  {description}")
+
+# --- Move any existing exes in dist/ into dist/old/ before building ---
+# Keeps dist/ holding only the current version (so git uploads just that one),
+# while older builds stay locally in dist/old/ (which is git-ignored).
+if os.path.isdir(DIST_DIR):
+    os.makedirs(OLD_DIR, exist_ok=True)
+    for entry in os.listdir(DIST_DIR):
+        if entry.lower().endswith(".exe"):
+            src = os.path.join(DIST_DIR, entry)
+            # Find a non-colliding destination name in old/
+            base, ext = os.path.splitext(entry)
+            dst = os.path.join(OLD_DIR, entry)
+            while os.path.exists(dst):
+                base = base + " - rebuild"
+                dst = os.path.join(OLD_DIR, base + ext)
+            shutil.move(src, dst)
+            print(f"Moved previous build to old/: {os.path.basename(dst)}")
 
 # --- Build the exe ---
 subprocess.run([
