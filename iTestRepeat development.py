@@ -13,13 +13,22 @@ import multiprocessing  # For running popups in a separate process (tkinter in a
 import argparse         # For command line arguments
 import sys              # For sys.argv, sys.exit, sys.executable, sys.frozen
 import os               # For path handling and reading the exe's own location
+import ctypes           # For ShellExecuteW (UAC-elevated service start)
 
-VERSION = "0.5.2"  # Countdown on auto-close button; all popups now in Hebrew
-DESC = "Hebrew popups and close countdown"
+VERSION = "0.6.0"  # Startup sequence: single-instance kill, wait-for-service popup, show passwords first
+DESC = "Service wait and single-instance startup"
 
 PROGRAM_PATH = r"C:\Program Files (x86)\CET\iTest\iTestLauncher.exe"
 PROCESS_NAME = "iTestLauncher.exe"  # Must match the exact process name shown in Task Manager
-OPEN = True       # Whether to actually launch iTest; get_exe_folder() sets it False in script mode (for testing)
+SERVICE_NAME = "registry test windows service"  # Real service iTest needs (overridden in script mode)
+SERVICE_TIMEOUT = 300  # First wait before showing options, in seconds (5 min — iTest support's guidance)
+RETRY_TIMEOUT = 60     # Each "keep waiting" retry, in seconds (1 min)
+#OPEN = True       # Whether to actually launch iTest; get_exe_folder() sets it False in script mode (for testing)
+#! v0.6.0 - Added a dummy program to launch in script mode instead of telling in not to launch. OPEN is no longer needed.
+
+# POTENTIAL OPTIMISATIONS (not urgent):
+# - Unify all window types (message/error, password, wait/options, modal confirm) into one class.
+# - Revisit rebuilding option buttons each time show_options() runs (currently destroys+recreates).
 
 # Hebrew UI strings — centralized so they're easy to find and edit (and to localize later)
 HE = {
@@ -53,6 +62,25 @@ HE = {
     # visible boxes), but it DOES act on these older embedding chars. So this is a "shouldn't really
     # work but does" case — keep the \u202A\u202C pair, not the isolates.
     "loop_not_number": "ערך לא חוקי: הארגומנט \u202A-l\u202C מקבל מספרים חיוביים בלבד. התקבל: \u202A{}\u202C",
+    # Service wait / options  (svc = service)
+    "svc_waiting": "ממתין לשירות של iTest...\nזמן המתנה: {}",   # {} = elapsed MM:SS
+    "svc_skip": "דלג על ההמתנה (לטכנאי בלבד)",
+    "svc_options": "השירות של iTest עדיין לא פעיל.\nמה ברצונך לעשות?",
+    "svc_start": "הפעל שירות",
+    "svc_launch_anyway": "הפעל את iTest בכל זאת",
+    "svc_keep_waiting": "המשך להמתין",
+    "svc_cancel": "ביטול (סגירת התוכנה)",
+    "svc_start_failed": "הפעלת השירות נכשלה או בוטלה.",
+    "svc_not_installed": "נראה ש-iTest אינו מותקן.\nיש להיכנס לאתר ולהוריד את התוכנה (נדרשת התחברות):\n{}",
+    "svc_no_service": "השירות של iTest לא נמצא, אך נראה ש-iTest מותקן.\nניתן לנסות להפעיל בכל זאת, או לבטל ולעבור לעמדה אחרת.",
+    "svc_status_starting": "[{}] מנסה להפעיל את השירות...",
+    "svc_status_failed": "[{}] הפעלת השירות נכשלה.",
+    # Technician-action warning
+    "tech_warn": "פעולה זו מיועדת לטכנאי בלבד.\nאין ללחוץ עליה ללא הנחיה.\n\nלהמשיך?",
+    "tech_yes": "כן, אני הטכנאי",
+    "tech_no": "ביטול",
+    # homepage only — no direct download link available
+    "itest_download_url": "https://itest.cet.ac.il/",
 }
 
 
@@ -60,15 +88,25 @@ def get_exe_folder():
     """Returns the folder where the exe (or script) is located.
     Needed because the 'current folder' depends on how the program was launched,
     which may differ from the exe's actual location.
-    Also sets OPEN = False when running as a script (so testing doesn't launch iTest)."""
-    global OPEN
+    In script mode also points global vars at a dummy test program,
+    so development doesn't wait on the real one."""
+    #global OPEN #! See comment where OPEN is first set
+    global PROGRAM_PATH
+    global PROCESS_NAME
+    # TESTING NOTE: making a local dummy Windows service to test the wait-for-service flow proved
+    # fiddly. We ended up testing against a real iTest install instead. If you know a
+    # clean way to spin up a throwaway service, it'd make testing this flow easier.
     if getattr(sys, 'frozen', False):
         # Running as a compiled exe (PyInstaller sets sys.frozen = True)
         return os.path.dirname(sys.executable)
     else:
-        # Running as a plain Python script — don't actually launch iTest
-        OPEN = False
-        return os.path.dirname(os.path.abspath(__file__))
+        # Running as a plain Python script — testing mode
+        #OPEN = False #! See comment where OPEN is first set
+        PROCESS_NAME = "iTestDummy.exe"
+        wd = os.path.dirname(os.path.abspath(__file__))
+        PROGRAM_PATH = os.path.join(wd, PROCESS_NAME)
+        return wd
+
 
 def _detect_justify(text):
     """Returns 'right' if the first letter in the text is Hebrew, else 'left'.
@@ -78,6 +116,7 @@ def _detect_justify(text):
             # Hebrew block is U+0590–U+05FF
             return "right" if "\u0590" <= ch <= "\u05FF" else "left"
     return "left"  # no letters at all (e.g. a pure-number password) → default left
+
 
 def _selectable_label(parent, text, family="Segoe UI", size=12, weight="normal", height=1,
                       justify=None, width=0, select_all_on_click=False):
@@ -116,6 +155,7 @@ def _selectable_label(parent, text, family="Segoe UI", size=12, weight="normal",
         widget.bind("<Button-1>", _select_all)
 
     return widget
+
 
 def _build_message_content(root, message, font=None, time_to_close=0):
     """Builds the layout for an info/error popup inside the given root window.
@@ -187,6 +227,7 @@ def _collapse(main_window):
 
     bar.update_idletasks()
     bar.geometry(f"+{(bar.winfo_screenwidth() - bar.winfo_width()) // 2}+0")  # Top-center, like the main popup
+
 
 def _build_password_content(root, tests):
     """Builds the password popup layout inside root.
@@ -312,6 +353,190 @@ def popup(message=None, tests=None, error=False, time_to_close=0, daemon=True, f
     return p
 
 
+def technician_warning(parent):
+    """Modal 'this is a technician-only action' confirmation, styled like a Windows warning dialog.
+    Returns True if confirmed, False otherwise. Reusable — attach to any technician-only button.
+    'parent' is the window it should be modal over."""
+    confirmed = {"value": False}  # dict so the button closures can mutate it (can't rebind a plain var)
+
+    win = tk.Toplevel(parent)
+    win.title(HE["title_error"])
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    win.grab_set()  # Modal: blocks the parent window until this is answered
+
+    msg = HE["tech_warn"]
+    _selectable_label(win, msg, height=len(msg.split("\n"))).grid(row=0, column=0, columnspan=2, padx=20, pady=20)
+
+    def choose(value):
+        confirmed["value"] = value
+        win.destroy()
+
+    ttk.Button(win, text=HE["tech_yes"], command=lambda: choose(True)).grid(row=1, column=0, padx=10, pady=10)
+    ttk.Button(win, text=HE["tech_no"], command=lambda: choose(False)).grid(row=1, column=1, padx=10, pady=10)
+
+    win.update_idletasks()
+    win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}+{win.winfo_screenheight() // 3}")
+    win.wait_window()  # Block until answered (Toplevel can't run its own mainloop)
+    return confirmed["value"]
+
+
+def _shell_execute(verb, file, params="", show=1, working_directory=None, parent=None):
+    """Readable wrapper around the positional Win32 ShellExecuteW
+    (hwnd, verb, file, parameters, directory, show).
+    verb: 'open', 'runas' (UAC elevation), etc. show: 1 = visible window, 0 = hidden."""
+    return ctypes.windll.shell32.ShellExecuteW(parent, verb, file, params, working_directory, show)
+
+
+def _service_wait_process(result_queue, start_epoch):
+    """Runs in its own process. Owns the entire wait-for-service experience:
+    - Polls the service every second, showing elapsed time since start_epoch.
+    - If the service comes up on its own (even while options are showing), closes and reports 'running'.
+    - 'Skip wait' (technician) or the SERVICE_TIMEOUT jumps to the options screen.
+    - Options: Start service (elevated), Launch anyway, Keep waiting, Cancel.
+    - Reports the verdict ('running' / 'launch' / 'cancel') back via result_queue.
+    Closing the window (X) counts as Cancel.
+
+    Verdict goes through a Queue rather than a shared Value purely for readability —
+    it lets us pass back strings that match the rest of the code's match/case style.
+
+    (FUTURE): when the service is missing but iTest IS installed, we currently offer the same
+    simple options. A richer flow (reinstall via UninstallString, support phone numbers, GitHub link)
+    is planned but deferred so a misconfiguration can't render iTestRepeat useless in the meantime.
+    Authentication for that flow: registry DisplayName == 'iTest' AND Publisher == 'CET', reading
+    InstallLocation (e.g. C:\\Program Files (x86)\\CET\\iTest) instead of the hardcoded PROGRAM_PATH.
+    Found under HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{GUID}."""
+    root = tk.Tk()
+    root.title(HE["title_info"])
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+
+    state = {"phase": "waiting", "deadline": start_epoch + SERVICE_TIMEOUT}
+
+    def on_close():
+        result_queue.put("cancel")
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    label = _selectable_label(root, HE["svc_waiting"].format("00:00"), height=2)
+    label.grid(row=0, column=0, padx=20, pady=20)
+
+    def _svc_status_line(msg_key):
+        """Returns a timestamped status string for the options window, e.g. '[14:03:21] מנסה להפעיל שירות...'.
+        msg_key: the suffix of the HE['svc_status_*'] key to show."""
+        stamp = time.strftime("%H:%M:%S")
+        text = HE["svc_options"] + "\n" + HE[f"svc_status_{msg_key}"].format(stamp)
+        return text
+
+    def set_label(text):
+        label.configure(state="normal")
+        label.delete("1.0", "end")
+        label.insert("1.0", text)
+        label.configure(state="disabled")
+
+    def finish(verdict):
+        result_queue.put(verdict)
+        root.destroy()
+
+    opt_frame = ttk.Frame(root)  # holds option buttons; shown only in the options phase
+
+    def back_to_waiting(retry_seconds):
+        state["phase"] = "waiting"
+        state["deadline"] = time.time() + retry_seconds
+        set_label(HE["svc_waiting"].format("00:00"))
+        opt_frame.grid_remove()  # hide options (remembers grid position for later)
+        skip_btn.grid()          # re-show the skip button (was hidden in options phase)
+
+    def show_options(missing=False):
+        state["phase"] = "options"
+        set_label(HE["svc_no_service"] if missing else HE["svc_options"])
+        skip_btn.grid_remove()  # hide skip while options are up
+
+        def do_start():
+            if technician_warning(root):
+                set_label(_svc_status_line("starting"))  # show "[HH:MM:SS] starting service…" on the options window
+                ps = (f"Start-Service -Name '{SERVICE_NAME}'; "
+                      f"Get-Service -Name '{SERVICE_NAME}'; Start-Sleep -Seconds 10")
+                try:
+                    _shell_execute(verb="runas", file="powershell", params=f'-Command "{ps}"', show=1)
+                except Exception as e:
+                    # Acknowledge the failure in its own dialog, then STAY on the options screen
+                    popup(f'{HE["svc_start_failed"]}\n({e})', error=True, time_to_close=10, daemon=False)
+                    set_label(_svc_status_line("failed"))  # update the options-window status line
+                else:
+                    back_to_waiting(RETRY_TIMEOUT)  # only on success-path: poll will confirm it came up
+
+        def do_launch():
+            if technician_warning(root):
+                finish("launch")
+
+        # Rebuild option buttons fresh each time (so repeated cycles don't stack duplicates)
+        for child in opt_frame.winfo_children():
+            child.destroy()
+        ttk.Button(opt_frame, text=HE["svc_start"], command=do_start).grid(row=0, column=0, padx=6, pady=8)
+        ttk.Button(opt_frame, text=HE["svc_launch_anyway"], command=do_launch).grid(row=0, column=1, padx=6, pady=8)
+        ttk.Button(opt_frame, text=HE["svc_keep_waiting"], command=lambda: back_to_waiting(RETRY_TIMEOUT)).grid(row=0, column=2, padx=6, pady=8)
+        ttk.Button(opt_frame, text=HE["svc_cancel"], command=on_close).grid(row=0, column=3, padx=6, pady=8)
+        opt_frame.grid(row=2, column=0, padx=10, pady=5)
+
+    def do_skip():
+        if technician_warning(root):
+            show_options()
+    skip_btn = ttk.Button(root, text=HE["svc_skip"], command=do_skip)
+    skip_btn.grid(row=1, column=0, padx=10, pady=10)
+
+    def tick():
+        # Poll the service first — if it's up, finish regardless of phase (covers "came up
+        # while options were showing", like the Windows 'app responded again' behaviour).
+        try:
+            status = psutil.win_service_get(SERVICE_NAME).status()
+            exists = True
+        except Exception:
+            status = None
+            exists = False  # service not found
+
+        if status == "running":
+            finish("running")
+            return
+
+        if state["phase"] == "waiting":
+            elapsed = int(time.time() - start_epoch)
+            mm, ss = divmod(elapsed, 60)
+            set_label(HE["svc_waiting"].format(f"{mm:02d}:{ss:02d}"))
+
+            if not exists:
+                # Service missing — is iTest even installed? (placeholder: check PROGRAM_PATH exists)
+                # FUTURE (#9): authenticate + locate via registry (see this function's docstring).
+                if not os.path.exists(PROGRAM_PATH):
+                    popup(HE["svc_not_installed"].format(HE["itest_download_url"]),
+                          error=True, time_to_close=60, daemon=False)
+                    finish("cancel")
+                    return
+                else:
+                    show_options(missing=True)  # installed but no service → options
+            elif time.time() >= state["deadline"]:
+                show_options()
+
+        root.after(1000, tick)  # next poll in 1 second
+
+    tick()
+    root.update_idletasks()
+    root.geometry(f"+{(root.winfo_screenwidth() - root.winfo_width()) // 2}+0")
+    root.mainloop()
+
+
+def wait_for_service():
+    """Starts the wait-for-service popup process and blocks until it reports a verdict.
+    Returns 'running', 'launch', or 'cancel'. On 'cancel', the caller should exit."""
+    result_queue = multiprocessing.Queue()
+    start_epoch = time.time()  # this instance's first check — the popup's timer counts from here
+    proc = multiprocessing.Process(target=_service_wait_process, args=(result_queue, start_epoch), daemon=True)
+    proc.start()
+    verdict = result_queue.get()  # blocks until the popup puts its decision on the queue
+    proc.join()                   # reap the finished process so it doesn't linger
+    return verdict
+
+
 def create_example_csv(csv_path):
     """Creates an example CSV at csv_path with 2 example tests for today.
     Refuses to overwrite an existing file."""
@@ -369,23 +594,42 @@ popup_process = None  # Tracks the current password popup process so we can clos
 
 
 def is_running():
-    """Returns True if iTest is currently in the process list."""
+    """Returns True if iTest(/the dummy) is currently in the process list."""
     return any(p.name() == PROCESS_NAME for p in psutil.process_iter())
 
 
-def launch(csv_path, csv_specified):
-    """Closes any existing password popup, shows a new one with today's passwords, then launches iTest."""
+def show_passwords(csv_path, csv_specified):
+    """Closes any existing password popup and shows a new one with today's passwords.
+    v0.6.0: split out from launch() so passwords can be shown without launching iTest
+    (used to show passwords up front even if iTest is already open). Remove this note at v0.7.0."""
     global popup_process
-
-    # Close previous popup if still open
     if popup_process is not None and popup_process.is_alive():
         popup_process.terminate()
-
     tests = get_today_tests(csv_path, csv_specified)
     if tests:
         popup_process = popup(tests=tests)
 
-    if OPEN: subprocess.Popen([PROGRAM_PATH])  # Launching the program
+
+def launch_itest():
+    """Launches iTest (in script mode PROGRAM_PATH points at the dummy exe, so this is safe to call during development).
+    v0.6.0: split out from launch(). Remove this note at v0.7.0."""
+    # if OPEN: #! See comment where OPEN is first set
+    subprocess.Popen([PROGRAM_PATH])  # Launching the program
+
+
+def kill_other_instances():
+    """Kills any other running instances of this exe, sparing only the current process.
+    SAFE ONLY AT STARTUP: runs before any popup subprocess exists, so the only process with
+    our name is ourselves. If moved later, it would also kill our own popup children."""
+    my_pid = os.getpid()
+    my_name = os.path.basename(sys.executable)
+    # Fetch name in the iterator so we can skip non-matching processes cheaply
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if proc.info["name"] == my_name and proc.info["pid"] != my_pid:
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass  # vanished or not ours to kill — skip
 
 
 def main():
@@ -492,6 +736,18 @@ def main():
             popup(HE["loop_not_number"].format(f"\u202C{args.loop}\u202A"),
                   error=True, time_to_close=60, daemon=False)
             sys.exit(2)
+
+    # --- Startup sequence (runs once, before the relaunch loop) ---
+    kill_other_instances()            # Ensure only this instance remains
+    verdict = wait_for_service()      # Block on the wait/options popup
+    if verdict == "cancel":
+        sys.exit()
+    # 'running' or 'launch' → proceed
+
+    # Show passwords up front so they're visible even if iTest is already open
+    show_passwords(csv_path, csv_specified)
+
+    # --- Relaunch loop ---
     i = 0
     launches = 0
     while True:
@@ -500,8 +756,10 @@ def main():
         if not is_running():
             if MAX_LOOPS and launches >= MAX_LOOPS:  # MAX_LOOPS=0 (infinite) is falsy → never breaks
                 break
-            launch(csv_path, csv_specified)
+            show_passwords(csv_path, csv_specified)
+            launch_itest()
             launches += 1
+        if i == 1: launches = 1  # Counts an iTest session that was already open in iTestRepeat launch to the "-l N" count
         time.sleep(3)
 
 
